@@ -21,11 +21,12 @@ import asyncio
 import websockets
 import requests
 from datetime import datetime, timezone
+from notify import send_discord_alert
 
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 AISSTREAM_API_KEY = os.environ["AISSTREAM_API_KEY"]
-LISTEN_SECONDS = int(os.environ.get("LISTEN_SECONDS", "240"))
+LISTEN_SECONDS = int(os.environ.get("LISTEN_SECONDS", "90"))
 
 HEADERS = {
     "apikey": SUPABASE_KEY,
@@ -95,11 +96,85 @@ def save_positions(positions: dict[int, dict]) -> None:
     print(f"{len(rows)}隻分の位置情報を保存しました。")
 
 
+def fetch_vessel_names() -> dict[int, str]:
+    """アラートメッセージ表示用に、mmsi -> 船名 の辞書を取得する"""
+    url = f"{SUPABASE_URL}/rest/v1/vessels?select=mmsi,name"
+    res = requests.get(url, headers=HEADERS, timeout=30)
+    res.raise_for_status()
+    return {row["mmsi"]: row["name"] for row in res.json()}
+
+
+def get_previous_state(mmsi: int) -> dict[int, bool]:
+    """ある船について、現在覚えている「ジオフェンスごとの中/外」状態を取得する"""
+    url = f"{SUPABASE_URL}/rest/v1/vessel_geofence_state?mmsi=eq.{mmsi}&select=geofence_id,inside"
+    res = requests.get(url, headers=HEADERS, timeout=30)
+    res.raise_for_status()
+    return {row["geofence_id"]: row["inside"] for row in res.json()}
+
+
+def get_current_geofences(lat: float, lon: float) -> dict[int, str]:
+    """今の位置が、どのジオフェンスの中にあるかをDB側の関数で判定する"""
+    url = f"{SUPABASE_URL}/rest/v1/rpc/point_in_geofences"
+    res = requests.post(url, headers=HEADERS, json={"p_lat": lat, "p_lon": lon}, timeout=30)
+    res.raise_for_status()
+    return {row["geofence_id"]: row["geofence_name"] for row in res.json()}
+
+
+def upsert_state(mmsi: int, geofence_id: int, inside: bool) -> None:
+    url = f"{SUPABASE_URL}/rest/v1/vessel_geofence_state"
+    headers = {**HEADERS, "Prefer": "resolution=merge-duplicates"}
+    row = {"mmsi": mmsi, "geofence_id": geofence_id, "inside": inside,
+           "updated_at": datetime.now(timezone.utc).isoformat()}
+    res = requests.post(url, headers=headers, json=row, timeout=30)
+    if res.status_code >= 300:
+        print("状態更新失敗:", res.status_code, res.text)
+
+
+def check_geofences(positions: dict[int, dict], vessel_names: dict[int, str]) -> None:
+    """各船について、今回の位置がジオフェンスに出入りしていないかを判定する。
+    出入りがあれば geofence_events / alerts に記録し、Discordに通知する。"""
+    for mmsi, pos in positions.items():
+        name = vessel_names.get(mmsi, str(mmsi))
+        previous = get_previous_state(mmsi)          # {geofence_id: bool}
+        current = get_current_geofences(pos["lat"], pos["lon"])  # {geofence_id: name}
+
+        # 「今回中にいる」ジオフェンス全部と、「前回覚えていた」ジオフェンス全部を突き合わせる
+        all_geofence_ids = set(previous.keys()) | set(current.keys())
+
+        for gid in all_geofence_ids:
+            was_inside = previous.get(gid, False)
+            is_inside = gid in current
+
+            if was_inside == is_inside:
+                continue  # 状態変化なし
+
+            event_type = "enter" if is_inside else "exit"
+            gname = current.get(gid, "エリア")
+            message = f"登録船「{name}」が「{gname}」に{'入りました' if is_inside else 'から出ました'}。"
+
+            event_url = f"{SUPABASE_URL}/rest/v1/geofence_events"
+            requests.post(event_url, headers=HEADERS, json={
+                "mmsi": mmsi, "geofence_id": gid, "event_type": event_type
+            }, timeout=30)
+
+            alert_url = f"{SUPABASE_URL}/rest/v1/alerts"
+            requests.post(alert_url, headers=HEADERS, json={
+                "mmsi": mmsi, "alert_type": "geofence", "message": message
+            }, timeout=30)
+
+            send_discord_alert(message)
+            upsert_state(mmsi, gid, is_inside)
+
+
 def main():
     mmsi_list = fetch_registered_mmsi_list()
     print(f"監視対象: {len(mmsi_list)}隻")
     positions = asyncio.run(collect_positions(mmsi_list))
     save_positions(positions)
+
+    if positions:
+        vessel_names = fetch_vessel_names()
+        check_geofences(positions, vessel_names)
 
 
 if __name__ == "__main__":
