@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 AISSTREAM_API_KEY = os.environ["AISSTREAM_API_KEY"]
-LISTEN_SECONDS = int(os.environ.get("LISTEN_SECONDS", "90"))
+LISTEN_SECONDS = int(os.environ.get("LISTEN_SECONDS", "240"))
 
 HEADERS = {
     "apikey": SUPABASE_KEY,
