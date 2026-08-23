@@ -1,0 +1,23 @@
+name: AIS位置情報の取得
+
+on:
+  schedule:
+    # 予備トリガー(外部cronサービスからのworkflow_dispatchをメインとする想定)
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  ais:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - run: python scraper_ais.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          AISSTREAM_API_KEY: ${{ secrets.AISSTREAM_API_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
