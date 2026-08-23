@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>船舶監視マップ</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+  html, body, #map { height: 100%; margin: 0; }
+  #panel {
+    position: absolute; top: 10px; right: 10px; z-index: 1000;
+    background: white; padding: 10px 14px; border-radius: 8px;
+    font-family: sans-serif; font-size: 14px; max-width: 260px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+  }
+  #panel h3 { margin: 0 0 6px; font-size: 15px; }
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+<div id="panel">
+  <h3>登録船監視マップ</h3>
+  <div id="status">読み込み中...</div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+// ------------------------------------------------------------
+// 以下2つをSupabaseプロジェクトの値に書き換えてください
+// (anon keyは公開しても問題ない読み取り専用キーです。service_roleキーは絶対に使わないこと)
+// ------------------------------------------------------------
+const SUPABASE_URL = "https://YOUR-PROJECT.supabase.co";
+const SUPABASE_ANON_KEY = "YOUR-ANON-KEY";
+
+const map = L.map('map').setView([34.5, 133.5], 7); // 瀬戸内海周辺を初期表示
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; OpenStreetMap contributors'
+}).addTo(map);
+
+const markers = {};
+
+async function supabaseFetch(path) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`
+    }
+  });
+  if (!res.ok) throw new Error(`Supabase fetch failed: ${res.status}`);
+  return res.json();
+}
+
+// 各船の最新位置だけを取得して表示する
+async function loadLatestPositions() {
+  // positionsテーブルを mmsi ごとにts降順、直近1件のみに絞る簡易実装。
+  // 件数が増えてきたらSupabase側にビュー(直近位置専用テーブル)を作るのがおすすめです。
+  const vessels = await supabaseFetch('vessels?select=mmsi,name&active=eq.true');
+  document.getElementById('status').innerText = `監視中: ${vessels.length}隻`;
+
+  for (const v of vessels) {
+    const rows = await supabaseFetch(
+      `positions?mmsi=eq.${v.mmsi}&order=ts.desc&limit=1`
+    );
+    if (rows.length === 0) continue;
+    const p = rows[0];
+
+    if (markers[v.mmsi]) {
+      markers[v.mmsi].setLatLng([p.lat, p.lon]);
+    } else {
+      markers[v.mmsi] = L.marker([p.lat, p.lon])
+        .addTo(map)
+        .bindPopup(`<b>${v.name}</b><br>MMSI: ${v.mmsi}<br>更新: ${p.ts}`);
+      markers[v.mmsi].on('click', () => loadTrack(v.mmsi, v.name));
+    }
+  }
+}
+
+// クリックした船の過去24時間分の航跡を線で表示する
+let trackLayer = null;
+async function loadTrack(mmsi, name) {
+  if (trackLayer) map.removeLayer(trackLayer);
+
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const rows = await supabaseFetch(
+    `positions?mmsi=eq.${mmsi}&ts=gte.${since}&order=ts.asc&select=lat,lon`
+  );
+  const latlngs = rows.map(r => [r.lat, r.lon]);
+  trackLayer = L.polyline(latlngs, { color: 'blue' }).addTo(map);
+  document.getElementById('status').innerText = `${name} の直近24時間の航跡 (${rows.length}点)`;
+}
+
+loadLatestPositions();
+setInterval(loadLatestPositions, 5 * 60 * 1000); // 5分おきに画面を更新
+</script>
+
+</body>
+</html>
