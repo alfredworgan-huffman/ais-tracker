@@ -21,6 +21,7 @@ import unicodedata
 import requests
 import pandas as pd
 from datetime import datetime, timezone
+from notify import send_discord_alert
 
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
@@ -141,6 +142,8 @@ def main():
                              headers=HEADERS, json=alert_rows, timeout=30)
         res.raise_for_status()
         print(f"アラート {len(alert_rows)}件を発報しました。")
+        for a in alert_rows:
+            send_discord_alert(a["message"])
     else:
         print("登録船と一致する通峡予告はありませんでした。")
 
