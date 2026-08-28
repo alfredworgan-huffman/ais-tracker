@@ -45,8 +45,8 @@
 // 以下2つをSupabaseプロジェクトの値に書き換えてください
 // (anon keyは公開しても問題ない読み取り専用キーです。service_roleキーは絶対に使わないこと)
 // ------------------------------------------------------------
-const SUPABASE_URL = "https://xzkvlsgkciwjkrlqzcmm.supabase.co";
-const SUPABASE_ANON_KEY = "sb_publishable_oSHH1EM145MzI-DiDIKndw_3PYkmDly";
+const SUPABASE_URL = "https://YOUR-PROJECT.supabase.co";
+const SUPABASE_ANON_KEY = "YOUR-ANON-KEY";
 
 // 航跡の表示期間の選択肢 (時間単位)
 const PERIOD_OPTIONS = [
@@ -85,6 +85,16 @@ function toJstString(utcString) {
     year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit'
   }) + ' JST';
+}
+
+// 経過日数に応じて赤(7日以上前)〜紫(直近)のグラデーション色を返す
+// 虹の七色(赤橙黄緑青藍紫)の順番をそのまま「古い→新しい」に対応させている
+function ageToColor(tsString) {
+  const daysAgo = (Date.now() - new Date(tsString).getTime()) / (24 * 60 * 60 * 1000);
+  const clamped = Math.max(0, Math.min(7, daysAgo));
+  // daysAgo=7(またはそれ以上) -> 色相0°(赤) / daysAgo=0 -> 色相270°(紫)
+  const hue = (1 - clamped / 7) * 270;
+  return `hsl(${hue}, 85%, 45%)`;
 }
 
 // ポップアップの中身(船名・更新時刻・航跡ON/OFFボタン・期間プルダウン)を組み立てる
@@ -150,7 +160,7 @@ async function loadLatestPositions() {
   }
 }
 
-// 指定した船・期間の航跡を「点+線」で描画する
+// 指定した船・期間の航跡を「点+線」で描画する(経過日数に応じたグラデーション色)
 async function loadTrack(mmsi, name, hours) {
   const since = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
   const rows = await supabaseFetch(
@@ -161,16 +171,22 @@ async function loadTrack(mmsi, name, hours) {
     return;
   }
 
-  const latlngs = rows.map(r => [r.lat, r.lon]);
   const group = L.layerGroup();
 
-  // 線(航跡全体)
-  L.polyline(latlngs, { color: 'blue', weight: 2 }).addTo(group);
+  // 線: 2点間ごとに短い線分として描画し、それぞれ新しい方の点の時刻で色付けする
+  // (Leafletの1本のpolylineは単色しか指定できないため、区間ごとに分割している)
+  for (let i = 1; i < rows.length; i++) {
+    const prev = rows[i - 1];
+    const curr = rows[i];
+    L.polyline([[prev.lat, prev.lon], [curr.lat, curr.lon]], {
+      color: ageToColor(curr.ts), weight: 3
+    }).addTo(group);
+  }
 
-  // 点(各取得ポイント)
+  // 点: 各取得ポイントをその時刻の色で描画
   rows.forEach(r => {
     L.circleMarker([r.lat, r.lon], {
-      radius: 3, color: 'blue', fillColor: 'blue', fillOpacity: 0.8
+      radius: 3, color: ageToColor(r.ts), fillColor: ageToColor(r.ts), fillOpacity: 0.9
     })
       .bindTooltip(toJstString(r.ts))
       .addTo(group);
@@ -179,7 +195,7 @@ async function loadTrack(mmsi, name, hours) {
   group.addTo(map);
   trackLayers[mmsi] = group;
 
-  document.getElementById('status').innerText = `${name} の航跡 (${rows.length}点)`;
+  document.getElementById('status').innerText = `${name} の航跡 (${rows.length}点) — 色は経過日数(赤=7日以上前 → 紫=直近)`;
 }
 
 // ジオフェンスの表示/非表示
