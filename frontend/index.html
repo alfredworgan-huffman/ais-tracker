@@ -38,9 +38,19 @@
     box-shadow: 0 1px 4px rgba(0,0,0,0.3);
   }
   #vesselPanel h3 { margin: 0 0 6px; font-size: 15px; }
-  .group-block { margin-bottom: 8px; }
-  .group-header { font-weight: bold; cursor: pointer; }
-  .vessel-row { margin-left: 16px; }
+  .group-block { margin-bottom: 6px; }
+  .group-header, .subgroup-header {
+    display: flex; align-items: center; cursor: pointer; user-select: none;
+  }
+  .group-header { font-weight: bold; }
+  .subgroup-header { font-weight: bold; margin-left: 16px; margin-top: 4px; font-size: 12.5px; }
+  .collapse-arrow {
+    display: inline-block; width: 14px; text-align: center; margin-right: 2px;
+  }
+  .group-body { margin-left: 4px; }
+  .subgroup-body { margin-left: 16px; }
+  .vessel-row { margin-left: 16px; display: block; }
+  .subgroup-body .vessel-row { margin-left: 16px; }
 </style>
 </head>
 <body>
@@ -84,8 +94,8 @@
 // 以下2つをSupabaseプロジェクトの値に書き換えてください
 // (anon keyは公開しても問題ない読み取り専用キーです。service_roleキーは絶対に使わないこと)
 // ------------------------------------------------------------
-const SUPABASE_URL = "https://xzkvlsgkciwjkrlqzcmm.supabase.co";
-const SUPABASE_ANON_KEY = "sb_publishable_oSHH1EM145MzI-DiDIKndw_3PYkmDly";
+const SUPABASE_URL = "https://YOUR-PROJECT.supabase.co";
+const SUPABASE_ANON_KEY = "YOUR-ANON-KEY";
 
 const map = L.map('map').setView([34.5, 133.5], 7); // 瀬戸内海周辺を初期表示
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -200,68 +210,187 @@ function wirePopupEvents(mmsi, name) {
   });
 }
 
-// 船の選択パネルを構築する(グループごとに見出しとチェックボックスをまとめる)
+// 折りたたみ状態(グループ/サブグループ単位)。キーは"メイングループ" または "メイングループ>サブグループ"。
+// 存在するキーは「折りたたみ中」を意味する。localStorageに保存し、次回開いた時も復元する。
+const COLLAPSE_STORAGE_KEY = 'ais-tracker-collapsed-groups';
+function loadCollapsedFromStorage() {
+  try {
+    const raw = localStorage.getItem(COLLAPSE_STORAGE_KEY);
+    return raw ? new Set(JSON.parse(raw)) : new Set();
+  } catch (e) {
+    return new Set();
+  }
+}
+function saveCollapsedToStorage() {
+  localStorage.setItem(COLLAPSE_STORAGE_KEY, JSON.stringify([...collapsedGroups]));
+}
+const collapsedGroups = loadCollapsedFromStorage();
+
+// チェックボックスの一覧から、全部ON/一部ON/全部OFFを判定してヘッダーのcheckboxに反映する
+function syncHeaderCheckboxState(headerCheckbox, childCheckboxes) {
+  const allChecked = childCheckboxes.length > 0 && childCheckboxes.every(cb => cb.checked);
+  const noneChecked = childCheckboxes.every(cb => !cb.checked);
+  headerCheckbox.checked = allChecked;
+  headerCheckbox.indeterminate = !allChecked && !noneChecked;
+}
+
+// 船の選択パネルを構築する(メイングループ > サブグループ > 船、の階層構造。折りたたみ対応)
 async function buildVesselPanel() {
-  const vessels = await supabaseFetch('vessels?select=mmsi,name,group_name&active=eq.true&order=group_name,name');
+  const vessels = await supabaseFetch(
+    'vessels?select=mmsi,name,group_name,subgroup_name&active=eq.true&order=group_name,subgroup_name,name'
+  );
   vessels.forEach(v => { vesselInfo[v.mmsi] = v; });
 
   // group_name未設定は「未分類」としてまとめる
-  const groups = {};
+  const groups = {}; // groupName -> { direct: [...], subgroups: { subgroupName: [...] } }
   vessels.forEach(v => {
     const g = v.group_name || '未分類';
-    if (!groups[g]) groups[g] = [];
-    groups[g].push(v);
+    if (!groups[g]) groups[g] = { direct: [], subgroups: {} };
+    if (v.subgroup_name) {
+      if (!groups[g].subgroups[v.subgroup_name]) groups[g].subgroups[v.subgroup_name] = [];
+      groups[g].subgroups[v.subgroup_name].push(v);
+    } else {
+      groups[g].direct.push(v);
+    }
   });
 
   const container = document.getElementById('vesselList');
   container.innerHTML = '';
 
+  // 船1隻分のチェックボックス行を作る共通ヘルパー
+  function buildVesselRow(v) {
+    const row = document.createElement('label');
+    row.className = 'vessel-row';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.dataset.mmsi = v.mmsi;
+    cb.checked = shownMmsis.has(v.mmsi);
+    cb.addEventListener('change', () => toggleVessel(v.mmsi, v.name, cb.checked));
+    row.appendChild(cb);
+    row.appendChild(document.createTextNode(' ' + v.name));
+    return { row, cb };
+  }
+
   Object.keys(groups).sort().forEach(groupName => {
+    const groupKey = groupName;
+    const groupAllVessels = [...groups[groupName].direct, ...Object.values(groups[groupName].subgroups).flat()];
+
     const block = document.createElement('div');
     block.className = 'group-block';
 
-    const header = document.createElement('label');
+    // --- メイングループの見出し ---
+    const header = document.createElement('div');
     header.className = 'group-header';
+    const arrow = document.createElement('span');
+    arrow.className = 'collapse-arrow';
+    arrow.textContent = collapsedGroups.has(groupKey) ? '▶' : '▼';
     const groupCheckbox = document.createElement('input');
     groupCheckbox.type = 'checkbox';
-    groupCheckbox.dataset.group = groupName;
+    header.appendChild(arrow);
     header.appendChild(groupCheckbox);
     header.appendChild(document.createTextNode(' ' + groupName));
     block.appendChild(header);
 
-    const childCheckboxes = [];
-    groups[groupName].forEach(v => {
-      const row = document.createElement('label');
-      row.className = 'vessel-row';
-      row.style.display = 'block';
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.dataset.mmsi = v.mmsi;
-      cb.checked = shownMmsis.has(v.mmsi);
-      cb.addEventListener('change', () => toggleVessel(v.mmsi, v.name, cb.checked));
-      row.appendChild(cb);
-      row.appendChild(document.createTextNode(' ' + v.name));
-      block.appendChild(row);
-      childCheckboxes.push(cb);
+    // --- 本体(直下の船 + サブグループ) ---
+    const body = document.createElement('div');
+    body.className = 'group-body';
+    body.style.display = collapsedGroups.has(groupKey) ? 'none' : 'block';
+
+    const allChildCheckboxes = []; // グループ全体の状態判定用(直下+サブグループ全部)
+
+    // メイングループ直下の船(サブグループ無し)
+    groups[groupName].direct.forEach(v => {
+      const { row, cb } = buildVesselRow(v);
+      body.appendChild(row);
+      allChildCheckboxes.push(cb);
     });
 
-    // グループ見出しのチェックボックスの初期状態(全部ON/一部ON/全部OFF)を反映
-    const allChecked = childCheckboxes.every(cb => cb.checked);
-    const noneChecked = childCheckboxes.every(cb => !cb.checked);
-    groupCheckbox.checked = allChecked;
-    groupCheckbox.indeterminate = !allChecked && !noneChecked;
+    // サブグループ
+    Object.keys(groups[groupName].subgroups).sort().forEach(subgroupName => {
+      const subgroupKey = `${groupName}>${subgroupName}`;
+      const subBlock = document.createElement('div');
 
+      const subHeader = document.createElement('div');
+      subHeader.className = 'subgroup-header';
+      const subArrow = document.createElement('span');
+      subArrow.className = 'collapse-arrow';
+      subArrow.textContent = collapsedGroups.has(subgroupKey) ? '▶' : '▼';
+      const subgroupCheckbox = document.createElement('input');
+      subgroupCheckbox.type = 'checkbox';
+      subHeader.appendChild(subArrow);
+      subHeader.appendChild(subgroupCheckbox);
+      subHeader.appendChild(document.createTextNode(' ' + subgroupName));
+      subBlock.appendChild(subHeader);
+
+      const subBody = document.createElement('div');
+      subBody.className = 'subgroup-body';
+      subBody.style.display = collapsedGroups.has(subgroupKey) ? 'none' : 'block';
+
+      const subChildCheckboxes = [];
+      groups[groupName].subgroups[subgroupName].forEach(v => {
+        const { row, cb } = buildVesselRow(v);
+        subBody.appendChild(row);
+        subChildCheckboxes.push(cb);
+        allChildCheckboxes.push(cb);
+      });
+      subBlock.appendChild(subBody);
+      body.appendChild(subBlock);
+
+      // サブグループ見出し: 折りたたみ(矢印クリック)
+      subArrow.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const isHidden = subBody.style.display === 'none';
+        subBody.style.display = isHidden ? 'block' : 'none';
+        subArrow.textContent = isHidden ? '▼' : '▶';
+        if (isHidden) collapsedGroups.delete(subgroupKey); else collapsedGroups.add(subgroupKey);
+        saveCollapsedToStorage();
+      });
+
+      // サブグループ見出し: 一括ON/OFF
+      subgroupCheckbox.addEventListener('change', () => {
+        subChildCheckboxes.forEach(cb => {
+          if (cb.checked !== subgroupCheckbox.checked) {
+            cb.checked = subgroupCheckbox.checked;
+            const mmsi = Number(cb.dataset.mmsi);
+            toggleVessel(mmsi, vesselInfo[mmsi].name, cb.checked);
+          }
+        });
+        syncHeaderCheckboxState(groupCheckbox, allChildCheckboxes);
+      });
+
+      syncHeaderCheckboxState(subgroupCheckbox, subChildCheckboxes);
+    });
+
+    block.appendChild(body);
+    container.appendChild(block);
+
+    // メイングループ見出し: 折りたたみ(矢印クリック)
+    arrow.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const isHidden = body.style.display === 'none';
+      body.style.display = isHidden ? 'block' : 'none';
+      arrow.textContent = isHidden ? '▼' : '▶';
+      if (isHidden) collapsedGroups.delete(groupKey); else collapsedGroups.add(groupKey);
+      saveCollapsedToStorage();
+    });
+
+    // メイングループ見出し: 一括ON/OFF(直下+サブグループすべて対象)
     groupCheckbox.addEventListener('change', () => {
-      childCheckboxes.forEach(cb => {
+      allChildCheckboxes.forEach(cb => {
         if (cb.checked !== groupCheckbox.checked) {
           cb.checked = groupCheckbox.checked;
           const mmsi = Number(cb.dataset.mmsi);
           toggleVessel(mmsi, vesselInfo[mmsi].name, cb.checked);
         }
       });
+      // サブグループ側のヘッダーチェックボックスも合わせて更新
+      body.querySelectorAll('.subgroup-header input[type=checkbox]').forEach(subCb => {
+        subCb.checked = groupCheckbox.checked;
+        subCb.indeterminate = false;
+      });
     });
 
-    container.appendChild(block);
+    syncHeaderCheckboxState(groupCheckbox, allChildCheckboxes);
   });
 
   document.getElementById('status').innerText = `登録: ${vessels.length}隻 / 表示中: ${shownMmsis.size}隻`;
