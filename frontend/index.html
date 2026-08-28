@@ -30,11 +30,26 @@
     /* transform-originを中心にして回転させる */
     transform-origin: center center;
   }
+  #vesselPanel {
+    position: absolute; top: 10px; left: 10px; z-index: 1000;
+    background: white; padding: 10px 14px; border-radius: 8px;
+    font-family: sans-serif; font-size: 13px; max-width: 240px;
+    max-height: 80vh; overflow-y: auto;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+  }
+  #vesselPanel h3 { margin: 0 0 6px; font-size: 15px; }
+  .group-block { margin-bottom: 8px; }
+  .group-header { font-weight: bold; cursor: pointer; }
+  .vessel-row { margin-left: 16px; }
 </style>
 </head>
 <body>
 
 <div id="map"></div>
+<div id="vesselPanel">
+  <h3>表示する船</h3>
+  <div id="vesselList">読み込み中...</div>
+</div>
 <div id="panel">
   <h3>登録船監視マップ</h3>
   <div id="status">読み込み中...</div>
@@ -69,17 +84,36 @@
 // 以下2つをSupabaseプロジェクトの値に書き換えてください
 // (anon keyは公開しても問題ない読み取り専用キーです。service_roleキーは絶対に使わないこと)
 // ------------------------------------------------------------
-const SUPABASE_URL = "https://xzkvlsgkciwjkrlqzcmm.supabase.co";
-const SUPABASE_ANON_KEY = "sb_publishable_oSHH1EM145MzI-DiDIKndw_3PYkmDly";
+const SUPABASE_URL = "https://YOUR-PROJECT.supabase.co";
+const SUPABASE_ANON_KEY = "YOUR-ANON-KEY";
 
 const map = L.map('map').setView([34.5, 133.5], 7); // 瀬戸内海周辺を初期表示
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '&copy; OpenStreetMap contributors'
 }).addTo(map);
 
-const markers = {};      // mmsi -> Leaflet marker (最新位置)
+const markers = {};      // mmsi -> Leaflet marker (最新位置、表示中の船のみ存在)
 const trackLayers = {};  // mmsi -> Leaflet layerGroup (点+線の航跡、表示中のみ存在)
 let geofenceLayer = null;
+
+// 表示ON(チェック済み)の船のMMSI一覧。localStorageに保存して次回開いた時も復元する。
+const STORAGE_KEY = 'ais-tracker-shown-mmsis';
+function loadShownMmsisFromStorage() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    return raw ? new Set(JSON.parse(raw)) : new Set();
+  } catch (e) {
+    return new Set();
+  }
+}
+function saveShownMmsisToStorage() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify([...shownMmsis]));
+}
+const shownMmsis = loadShownMmsisFromStorage();
+
+// mmsi -> 船情報(name, group_name)。選択パネル構築時に埋める。
+const vesselInfo = {};
+
 
 // 向き(度)に応じて回転した矢印アイコンを作る。
 // heading/cogが無い(null)場合は、向きの分からない丸アイコンにフォールバックする。
@@ -166,33 +200,124 @@ function wirePopupEvents(mmsi, name) {
   });
 }
 
-// 各船の最新位置だけを取得して表示する(常時ラベル付き)
-async function loadLatestPositions() {
-  const vessels = await supabaseFetch('vessels?select=mmsi,name&active=eq.true');
-  document.getElementById('status').innerText = `監視中: ${vessels.length}隻`;
+// 船の選択パネルを構築する(グループごとに見出しとチェックボックスをまとめる)
+async function buildVesselPanel() {
+  const vessels = await supabaseFetch('vessels?select=mmsi,name,group_name&active=eq.true&order=group_name,name');
+  vessels.forEach(v => { vesselInfo[v.mmsi] = v; });
 
-  for (const v of vessels) {
-    const rows = await supabaseFetch(
-      `positions?mmsi=eq.${v.mmsi}&order=ts.desc&limit=1&select=lat,lon,ts,heading,cog`
-    );
-    if (rows.length === 0) continue;
-    const p = rows[0];
-    const tsJst = toJstString(p.ts);
-    // TrueHeadingが無ければ対地針路(cog)で代用する(511はAISの「データ無し」の値)
-    const headingDeg = (p.heading !== null && p.heading !== 511) ? p.heading : p.cog;
+  // group_name未設定は「未分類」としてまとめる
+  const groups = {};
+  vessels.forEach(v => {
+    const g = v.group_name || '未分類';
+    if (!groups[g]) groups[g] = [];
+    groups[g].push(v);
+  });
 
-    if (markers[v.mmsi]) {
-      markers[v.mmsi].setLatLng([p.lat, p.lon]);
-      markers[v.mmsi].setIcon(buildShipIcon(headingDeg));
-      markers[v.mmsi].setPopupContent(buildPopupContent(v.mmsi, v.name, tsJst));
-    } else {
-      markers[v.mmsi] = L.marker([p.lat, p.lon], { icon: buildShipIcon(headingDeg) })
-        .addTo(map)
-        .bindTooltip(v.name, { permanent: true, direction: 'right', className: 'ship-label' })
-        .bindPopup(buildPopupContent(v.mmsi, v.name, tsJst));
+  const container = document.getElementById('vesselList');
+  container.innerHTML = '';
 
-      markers[v.mmsi].on('popupopen', () => wirePopupEvents(v.mmsi, v.name));
-    }
+  Object.keys(groups).sort().forEach(groupName => {
+    const block = document.createElement('div');
+    block.className = 'group-block';
+
+    const header = document.createElement('label');
+    header.className = 'group-header';
+    const groupCheckbox = document.createElement('input');
+    groupCheckbox.type = 'checkbox';
+    groupCheckbox.dataset.group = groupName;
+    header.appendChild(groupCheckbox);
+    header.appendChild(document.createTextNode(' ' + groupName));
+    block.appendChild(header);
+
+    const childCheckboxes = [];
+    groups[groupName].forEach(v => {
+      const row = document.createElement('label');
+      row.className = 'vessel-row';
+      row.style.display = 'block';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.dataset.mmsi = v.mmsi;
+      cb.checked = shownMmsis.has(v.mmsi);
+      cb.addEventListener('change', () => toggleVessel(v.mmsi, v.name, cb.checked));
+      row.appendChild(cb);
+      row.appendChild(document.createTextNode(' ' + v.name));
+      block.appendChild(row);
+      childCheckboxes.push(cb);
+    });
+
+    // グループ見出しのチェックボックスの初期状態(全部ON/一部ON/全部OFF)を反映
+    const allChecked = childCheckboxes.every(cb => cb.checked);
+    const noneChecked = childCheckboxes.every(cb => !cb.checked);
+    groupCheckbox.checked = allChecked;
+    groupCheckbox.indeterminate = !allChecked && !noneChecked;
+
+    groupCheckbox.addEventListener('change', () => {
+      childCheckboxes.forEach(cb => {
+        if (cb.checked !== groupCheckbox.checked) {
+          cb.checked = groupCheckbox.checked;
+          const mmsi = Number(cb.dataset.mmsi);
+          toggleVessel(mmsi, vesselInfo[mmsi].name, cb.checked);
+        }
+      });
+    });
+
+    container.appendChild(block);
+  });
+
+  document.getElementById('status').innerText = `登録: ${vessels.length}隻 / 表示中: ${shownMmsis.size}隻`;
+
+  // 初回表示: 前回チェックしていた船があれば、その最新位置を読み込む
+  for (const mmsi of shownMmsis) {
+    if (vesselInfo[mmsi]) await refreshVesselMarker(mmsi);
+  }
+}
+
+// チェックボックスON/OFF時の処理
+async function toggleVessel(mmsi, name, checked) {
+  if (checked) {
+    shownMmsis.add(mmsi);
+    await refreshVesselMarker(mmsi);
+  } else {
+    shownMmsis.delete(mmsi);
+    if (markers[mmsi]) { map.removeLayer(markers[mmsi]); delete markers[mmsi]; }
+    if (trackLayers[mmsi]) { map.removeLayer(trackLayers[mmsi]); delete trackLayers[mmsi]; }
+  }
+  saveShownMmsisToStorage();
+  document.getElementById('status').innerText = `表示中: ${shownMmsis.size}隻`;
+}
+
+// 表示中(チェック済み)の船だけ、最新位置を取得してマーカーを更新/新規作成する
+async function refreshVesselMarker(mmsi) {
+  const v = vesselInfo[mmsi];
+  if (!v) return;
+
+  const rows = await supabaseFetch(
+    `positions?mmsi=eq.${mmsi}&order=ts.desc&limit=1&select=lat,lon,ts,heading,cog`
+  );
+  if (rows.length === 0) return;
+  const p = rows[0];
+  const tsJst = toJstString(p.ts);
+  // TrueHeadingが無ければ対地針路(cog)で代用する(511はAISの「データ無し」の値)
+  const headingDeg = (p.heading !== null && p.heading !== 511) ? p.heading : p.cog;
+
+  if (markers[mmsi]) {
+    markers[mmsi].setLatLng([p.lat, p.lon]);
+    markers[mmsi].setIcon(buildShipIcon(headingDeg));
+    markers[mmsi].setPopupContent(buildPopupContent(mmsi, v.name, tsJst));
+  } else {
+    markers[mmsi] = L.marker([p.lat, p.lon], { icon: buildShipIcon(headingDeg) })
+      .addTo(map)
+      .bindTooltip(v.name, { permanent: true, direction: 'right', className: 'ship-label' })
+      .bindPopup(buildPopupContent(mmsi, v.name, tsJst));
+
+    markers[mmsi].on('popupopen', () => wirePopupEvents(mmsi, v.name));
+  }
+}
+
+// 表示中(チェック済み)の船だけを対象に、最新位置を一括更新する(5分おきに実行)
+async function refreshAllShownMarkers() {
+  for (const mmsi of shownMmsis) {
+    await refreshVesselMarker(mmsi);
   }
 }
 
@@ -323,8 +448,8 @@ async function loadGeofences() {
   geofenceLayer.addTo(map);
 }
 
-loadLatestPositions();
-setInterval(loadLatestPositions, 5 * 60 * 1000); // 5分おきに最新位置を更新
+buildVesselPanel();
+setInterval(refreshAllShownMarkers, 5 * 60 * 1000); // 5分おきに「表示中の船だけ」最新位置を更新
 </script>
 
 </body>
