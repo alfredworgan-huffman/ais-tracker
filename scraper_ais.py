@@ -67,13 +67,19 @@ async def collect_positions(mmsi_list: list[int]) -> dict[int, dict]:
                         continue
                     report = msg["Message"]["PositionReport"]
                     mmsi = report["UserID"]
+                    cog = report.get("Cog")
+                    true_heading = report.get("TrueHeading")
+                    # TrueHeading=511は「データ無し」を意味するAISの仕様上の値。
+                    # その場合は対地針路(Cog)を代わりに使う。
+                    heading = true_heading if (true_heading is not None and true_heading != 511) else cog
                     latest[mmsi] = {
                         "mmsi": mmsi,
                         "ts": datetime.now(timezone.utc).isoformat(),
                         "lat": report["Latitude"],
                         "lon": report["Longitude"],
                         "sog": report.get("Sog"),
-                        "cog": report.get("Cog"),
+                        "cog": cog,
+                        "heading": heading,
                     }
         except TimeoutError:
             pass  # 規定秒数経過したら正常終了
