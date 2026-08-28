@@ -41,6 +41,26 @@
   <label id="geofenceToggle">
     <input type="checkbox" id="geofenceCheckbox"> ジオフェンスを表示
   </label>
+
+  <div id="periodPanel" style="margin-top:10px; border-top:1px solid #ddd; padding-top:8px;">
+    <div style="font-weight:bold; margin-bottom:4px;">航跡表示期間</div>
+    <select id="periodPreset" style="width:100%; font-size:13px;">
+      <option value="0,1">直近24時間</option>
+      <option value="0,3">直近3日</option>
+      <option value="0,7" selected>直近7日</option>
+      <option value="7,14">7〜14日前</option>
+      <option value="14,30">14〜30日前</option>
+      <option value="custom">カスタム(日数を指定)</option>
+    </select>
+    <div id="customPeriodInputs" style="display:none; margin-top:6px;">
+      <input type="number" id="periodFrom" min="0" max="30" value="0" style="width:50px;"> 日前 〜
+      <input type="number" id="periodTo" min="0" max="30" value="7" style="width:50px;"> 日前
+    </div>
+    <button id="applyPeriodBtn" style="margin-top:6px; width:100%; cursor:pointer;">この期間で表示中の船を更新</button>
+    <div style="font-size:11px; color:#666; margin-top:4px;">
+      ※7日を超える期間は点を間引いて表示します
+    </div>
+  </div>
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -49,17 +69,8 @@
 // 以下2つをSupabaseプロジェクトの値に書き換えてください
 // (anon keyは公開しても問題ない読み取り専用キーです。service_roleキーは絶対に使わないこと)
 // ------------------------------------------------------------
-const SUPABASE_URL = "https://xzkvlsgkciwjkrlqzcmm.supabase.co";
-const SUPABASE_ANON_KEY = "sb_publishable_oSHH1EM145MzI-DiDIKndw_3PYkmDly";
-
-// 航跡の表示期間の選択肢 (時間単位)
-const PERIOD_OPTIONS = [
-  { label: "1時間", hours: 1 },
-  { label: "6時間", hours: 6 },
-  { label: "24時間", hours: 24 },
-  { label: "3日間", hours: 72 },
-  { label: "7日間", hours: 168 },
-];
+const SUPABASE_URL = "https://YOUR-PROJECT.supabase.co";
+const SUPABASE_ANON_KEY = "YOUR-ANON-KEY";
 
 const map = L.map('map').setView([34.5, 133.5], 7); // 瀬戸内海周辺を初期表示
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -110,28 +121,29 @@ function toJstString(utcString) {
   }) + ' JST';
 }
 
-// 経過日数に応じて赤(7日以上前)〜紫(直近)のグラデーション色を返す
-// 虹の七色(赤橙黄緑青藍紫)の順番をそのまま「古い→新しい」に対応させている
-function ageToColor(tsString) {
+// 経過日数に応じて赤(期間の最も古い側)〜紫(直近)のグラデーション色を返す
+// maxDays: 現在選択されている表示期間の「〜日前」側の値(グラデーションの基準)
+function ageToColor(tsString, maxDays) {
   const daysAgo = (Date.now() - new Date(tsString).getTime()) / (24 * 60 * 60 * 1000);
-  const clamped = Math.max(0, Math.min(7, daysAgo));
-  // daysAgo=7(またはそれ以上) -> 色相0°(赤) / daysAgo=0 -> 色相270°(紫)
-  const hue = (1 - clamped / 7) * 270;
+  const span = Math.max(maxDays, 0.01); // 0除算防止
+  const clamped = Math.max(0, Math.min(span, daysAgo));
+  const hue = (1 - clamped / span) * 270;
   return `hsl(${hue}, 85%, 45%)`;
 }
 
-// ポップアップの中身(船名・更新時刻・航跡ON/OFFボタン・期間プルダウン)を組み立てる
+// 現在適用されている航跡表示期間(全船共通・全体メニューで設定)
+let currentPeriod = { fromDays: 0, toDays: 7 };
+
+
+// ポップアップの中身(船名・更新時刻・航跡ON/OFFボタン)を組み立てる
+// 表示期間は個別ではなく、画面右上の全体メニューで設定した期間(currentPeriod)を使う
 function buildPopupContent(mmsi, name, tsJst) {
-  const periodOptionsHtml = PERIOD_OPTIONS
-    .map(p => `<option value="${p.hours}">${p.label}</option>`)
-    .join('');
   const isShown = !!trackLayers[mmsi];
   return `
     <div class="popup-controls">
       <b>${name}</b><br>
       MMSI: ${mmsi}<br>
       更新: ${tsJst}<br>
-      <select id="period-${mmsi}">${periodOptionsHtml}</select>
       <button id="trackBtn-${mmsi}">${isShown ? '航跡を非表示' : '航跡を表示'}</button>
     </div>
   `;
@@ -148,9 +160,7 @@ function wirePopupEvents(mmsi, name) {
       delete trackLayers[mmsi];
       btn.textContent = '航跡を表示';
     } else {
-      const select = document.getElementById(`period-${mmsi}`);
-      const hours = Number(select.value);
-      await loadTrack(mmsi, name, hours);
+      await loadTrack(mmsi, name);
       btn.textContent = '航跡を非表示';
     }
   });
@@ -186,18 +196,41 @@ async function loadLatestPositions() {
   }
 }
 
-// 指定した船・期間の航跡を「点+線」で描画する(経過日数に応じたグラデーション色)
-async function loadTrack(mmsi, name, hours) {
-  const since = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
-  const rows = await supabaseFetch(
-    `positions?mmsi=eq.${mmsi}&ts=gte.${since}&order=ts.asc&select=lat,lon,ts`
+// 指定した船の航跡を「点+線」で描画する(全体メニューで選んだ期間・経過日数に応じたグラデーション色)
+// vesselNames: mmsi -> name の対応(期間変更時の一括再読み込みで使う)
+const vesselNames = {};
+
+async function loadTrack(mmsi, name) {
+  vesselNames[mmsi] = name;
+
+  const { fromDays, toDays } = currentPeriod;
+  const since = new Date(Date.now() - toDays * 24 * 60 * 60 * 1000).toISOString();
+  const until = new Date(Date.now() - fromDays * 24 * 60 * 60 * 1000).toISOString();
+
+  let rows = await supabaseFetch(
+    `positions?mmsi=eq.${mmsi}&ts=gte.${since}&ts=lte.${until}&order=ts.asc&select=lat,lon,ts`
   );
+
+  // 7日を超える期間は、点が多くなりすぎて煩雑になるため間引く
+  // (最大300点程度になるよう均等にスキップする簡易的な間引き)
+  const periodSpanDays = toDays - fromDays;
+  if (periodSpanDays > 7 && rows.length > 300) {
+    const step = Math.ceil(rows.length / 300);
+    rows = rows.filter((_, i) => i % step === 0);
+  }
+
   if (rows.length === 0) {
     document.getElementById('status').innerText = `${name}: 指定期間の航跡データがありません`;
+    // 既存のレイヤーがあれば消しておく(期間変更で0件になった場合)
+    if (trackLayers[mmsi]) { map.removeLayer(trackLayers[mmsi]); delete trackLayers[mmsi]; }
     return;
   }
 
+  // 既に表示中なら一旦消してから描き直す(期間変更時の更新用)
+  if (trackLayers[mmsi]) { map.removeLayer(trackLayers[mmsi]); delete trackLayers[mmsi]; }
+
   const group = L.layerGroup();
+  const maxDaysForColor = Math.max(toDays, 0.5);
 
   // 線: 2点間ごとに短い線分として描画し、それぞれ新しい方の点の時刻で色付けする
   // (Leafletの1本のpolylineは単色しか指定できないため、区間ごとに分割している)
@@ -205,14 +238,14 @@ async function loadTrack(mmsi, name, hours) {
     const prev = rows[i - 1];
     const curr = rows[i];
     L.polyline([[prev.lat, prev.lon], [curr.lat, curr.lon]], {
-      color: ageToColor(curr.ts), weight: 3
+      color: ageToColor(curr.ts, maxDaysForColor), weight: 3
     }).addTo(group);
   }
 
   // 点: 各取得ポイントをその時刻の色で描画
   rows.forEach(r => {
     L.circleMarker([r.lat, r.lon], {
-      radius: 3, color: ageToColor(r.ts), fillColor: ageToColor(r.ts), fillOpacity: 0.9
+      radius: 3, color: ageToColor(r.ts, maxDaysForColor), fillColor: ageToColor(r.ts, maxDaysForColor), fillOpacity: 0.9
     })
       .bindTooltip(toJstString(r.ts))
       .addTo(group);
@@ -221,8 +254,46 @@ async function loadTrack(mmsi, name, hours) {
   group.addTo(map);
   trackLayers[mmsi] = group;
 
-  document.getElementById('status').innerText = `${name} の航跡 (${rows.length}点) — 色は経過日数(赤=7日以上前 → 紫=直近)`;
+  document.getElementById('status').innerText =
+    `${name} の航跡 (${rows.length}点, ${fromDays}〜${toDays}日前)`;
 }
+
+// --- 全体メニュー: 航跡表示期間の操作 ---
+
+function applyPresetToInputs(value) {
+  if (value === 'custom') {
+    document.getElementById('customPeriodInputs').style.display = 'block';
+    return;
+  }
+  document.getElementById('customPeriodInputs').style.display = 'none';
+  const [from, to] = value.split(',').map(Number);
+  document.getElementById('periodFrom').value = from;
+  document.getElementById('periodTo').value = to;
+}
+
+document.getElementById('periodPreset').addEventListener('change', (e) => {
+  applyPresetToInputs(e.target.value);
+});
+
+// 「この期間で表示中の船を更新」ボタン: 現在表示中(ONになっている)船を、新しい期間で描き直す
+document.getElementById('applyPeriodBtn').addEventListener('click', async () => {
+  const fromDays = Number(document.getElementById('periodFrom').value);
+  const toDays = Number(document.getElementById('periodTo').value);
+  if (fromDays >= toDays) {
+    document.getElementById('status').innerText = '「〜日前」は開始日数より大きい値にしてください';
+    return;
+  }
+  currentPeriod = { fromDays, toDays };
+
+  const mmsisToRefresh = Object.keys(trackLayers).map(Number);
+  if (mmsisToRefresh.length === 0) {
+    document.getElementById('status').innerText = '航跡を表示中の船がありません(先にマーカーをクリックして表示してください)';
+    return;
+  }
+  for (const mmsi of mmsisToRefresh) {
+    await loadTrack(mmsi, vesselNames[mmsi] || String(mmsi));
+  }
+});
 
 // ジオフェンスの表示/非表示
 document.getElementById('geofenceCheckbox').addEventListener('change', async (e) => {
