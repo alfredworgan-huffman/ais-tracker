@@ -10,10 +10,22 @@
   #panel {
     position: absolute; top: 10px; right: 10px; z-index: 1000;
     background: white; padding: 10px 14px; border-radius: 8px;
-    font-family: sans-serif; font-size: 14px; max-width: 260px;
+    font-family: sans-serif; font-size: 14px; max-width: 280px;
     box-shadow: 0 1px 4px rgba(0,0,0,0.3);
   }
   #panel h3 { margin: 0 0 6px; font-size: 15px; }
+  #geofenceToggle { margin-top: 8px; }
+  .ship-label {
+    background: rgba(255,255,255,0.85); border: none; box-shadow: none;
+    font-size: 11px; padding: 1px 4px; white-space: nowrap;
+  }
+  .popup-controls { font-size: 13px; }
+  .popup-controls select, .popup-controls button {
+    font-size: 13px; margin-top: 4px;
+  }
+  .popup-controls button {
+    cursor: pointer; padding: 3px 8px;
+  }
 </style>
 </head>
 <body>
@@ -22,6 +34,9 @@
 <div id="panel">
   <h3>登録船監視マップ</h3>
   <div id="status">読み込み中...</div>
+  <label id="geofenceToggle">
+    <input type="checkbox" id="geofenceCheckbox"> ジオフェンスを表示
+  </label>
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -30,15 +45,26 @@
 // 以下2つをSupabaseプロジェクトの値に書き換えてください
 // (anon keyは公開しても問題ない読み取り専用キーです。service_roleキーは絶対に使わないこと)
 // ------------------------------------------------------------
-const SUPABASE_URL = "https://xzkvlsgkciwjkrlqzcmm.supabase.co";
-const SUPABASE_ANON_KEY = "sb_publishable_oSHH1EM145MzI-DiDIKndw_3PYkmDly";
+const SUPABASE_URL = "https://YOUR-PROJECT.supabase.co";
+const SUPABASE_ANON_KEY = "YOUR-ANON-KEY";
+
+// 航跡の表示期間の選択肢 (時間単位)
+const PERIOD_OPTIONS = [
+  { label: "1時間", hours: 1 },
+  { label: "6時間", hours: 6 },
+  { label: "24時間", hours: 24 },
+  { label: "3日間", hours: 72 },
+  { label: "7日間", hours: 168 },
+];
 
 const map = L.map('map').setView([34.5, 133.5], 7); // 瀬戸内海周辺を初期表示
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '&copy; OpenStreetMap contributors'
 }).addTo(map);
 
-const markers = {};
+const markers = {};      // mmsi -> Leaflet marker (最新位置)
+const trackLayers = {};  // mmsi -> Leaflet layerGroup (点+線の航跡、表示中のみ存在)
+let geofenceLayer = null;
 
 async function supabaseFetch(path) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
@@ -51,10 +77,54 @@ async function supabaseFetch(path) {
   return res.json();
 }
 
-// 各船の最新位置だけを取得して表示する
+// UTC文字列を日本時間(JST)の読みやすい表記に変換する
+function toJstString(utcString) {
+  const d = new Date(utcString);
+  return d.toLocaleString('ja-JP', {
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit'
+  }) + ' JST';
+}
+
+// ポップアップの中身(船名・更新時刻・航跡ON/OFFボタン・期間プルダウン)を組み立てる
+function buildPopupContent(mmsi, name, tsJst) {
+  const periodOptionsHtml = PERIOD_OPTIONS
+    .map(p => `<option value="${p.hours}">${p.label}</option>`)
+    .join('');
+  const isShown = !!trackLayers[mmsi];
+  return `
+    <div class="popup-controls">
+      <b>${name}</b><br>
+      MMSI: ${mmsi}<br>
+      更新: ${tsJst}<br>
+      <select id="period-${mmsi}">${periodOptionsHtml}</select>
+      <button id="trackBtn-${mmsi}">${isShown ? '航跡を非表示' : '航跡を表示'}</button>
+    </div>
+  `;
+}
+
+// ポップアップが開かれた時、ボタンにクリックイベントを仕込む
+function wirePopupEvents(mmsi, name) {
+  const btn = document.getElementById(`trackBtn-${mmsi}`);
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    if (trackLayers[mmsi]) {
+      // 既に表示中なら非表示にする
+      map.removeLayer(trackLayers[mmsi]);
+      delete trackLayers[mmsi];
+      btn.textContent = '航跡を表示';
+    } else {
+      const select = document.getElementById(`period-${mmsi}`);
+      const hours = Number(select.value);
+      await loadTrack(mmsi, name, hours);
+      btn.textContent = '航跡を非表示';
+    }
+  });
+}
+
+// 各船の最新位置だけを取得して表示する(常時ラベル付き)
 async function loadLatestPositions() {
-  // positionsテーブルを mmsi ごとにts降順、直近1件のみに絞る簡易実装。
-  // 件数が増えてきたらSupabase側にビュー(直近位置専用テーブル)を作るのがおすすめです。
   const vessels = await supabaseFetch('vessels?select=mmsi,name&active=eq.true');
   document.getElementById('status').innerText = `監視中: ${vessels.length}隻`;
 
@@ -64,34 +134,84 @@ async function loadLatestPositions() {
     );
     if (rows.length === 0) continue;
     const p = rows[0];
+    const tsJst = toJstString(p.ts);
 
     if (markers[v.mmsi]) {
       markers[v.mmsi].setLatLng([p.lat, p.lon]);
+      markers[v.mmsi].setPopupContent(buildPopupContent(v.mmsi, v.name, tsJst));
     } else {
       markers[v.mmsi] = L.marker([p.lat, p.lon])
         .addTo(map)
-        .bindPopup(`<b>${v.name}</b><br>MMSI: ${v.mmsi}<br>更新: ${p.ts}`);
-      markers[v.mmsi].on('click', () => loadTrack(v.mmsi, v.name));
+        .bindTooltip(v.name, { permanent: true, direction: 'right', className: 'ship-label' })
+        .bindPopup(buildPopupContent(v.mmsi, v.name, tsJst));
+
+      markers[v.mmsi].on('popupopen', () => wirePopupEvents(v.mmsi, v.name));
     }
   }
 }
 
-// クリックした船の過去24時間分の航跡を線で表示する
-let trackLayer = null;
-async function loadTrack(mmsi, name) {
-  if (trackLayer) map.removeLayer(trackLayer);
-
-  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+// 指定した船・期間の航跡を「点+線」で描画する
+async function loadTrack(mmsi, name, hours) {
+  const since = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
   const rows = await supabaseFetch(
-    `positions?mmsi=eq.${mmsi}&ts=gte.${since}&order=ts.asc&select=lat,lon`
+    `positions?mmsi=eq.${mmsi}&ts=gte.${since}&order=ts.asc&select=lat,lon,ts`
   );
+  if (rows.length === 0) {
+    document.getElementById('status').innerText = `${name}: 指定期間の航跡データがありません`;
+    return;
+  }
+
   const latlngs = rows.map(r => [r.lat, r.lon]);
-  trackLayer = L.polyline(latlngs, { color: 'blue' }).addTo(map);
-  document.getElementById('status').innerText = `${name} の直近24時間の航跡 (${rows.length}点)`;
+  const group = L.layerGroup();
+
+  // 線(航跡全体)
+  L.polyline(latlngs, { color: 'blue', weight: 2 }).addTo(group);
+
+  // 点(各取得ポイント)
+  rows.forEach(r => {
+    L.circleMarker([r.lat, r.lon], {
+      radius: 3, color: 'blue', fillColor: 'blue', fillOpacity: 0.8
+    })
+      .bindTooltip(toJstString(r.ts))
+      .addTo(group);
+  });
+
+  group.addTo(map);
+  trackLayers[mmsi] = group;
+
+  document.getElementById('status').innerText = `${name} の航跡 (${rows.length}点)`;
+}
+
+// ジオフェンスの表示/非表示
+document.getElementById('geofenceCheckbox').addEventListener('change', async (e) => {
+  if (e.target.checked) {
+    await loadGeofences();
+  } else if (geofenceLayer) {
+    map.removeLayer(geofenceLayer);
+    geofenceLayer = null;
+  }
+});
+
+async function loadGeofences() {
+  // geofences.polygon は geography(Polygon) 型。PostgRESTはデフォルトでGeoJSON文字列を返さないため、
+  // Supabase側に以下のビューを1度だけ作成しておくと簡単に取得できます:
+  //
+  //   create or replace view geofences_geojson as
+  //   select id, name, st_asgeojson(polygon)::json as geojson
+  //   from geofences where active = true;
+  //
+  const rows = await supabaseFetch('geofences_geojson?select=id,name,geojson');
+  geofenceLayer = L.layerGroup();
+  rows.forEach(r => {
+    L.geoJSON(r.geojson, { style: { color: 'red', weight: 2, fillOpacity: 0.1 } })
+      .bindTooltip(r.name)
+      .addTo(geofenceLayer);
+  });
+  geofenceLayer.addTo(map);
 }
 
 loadLatestPositions();
-setInterval(loadLatestPositions, 5 * 60 * 1000); // 5分おきに画面を更新
+setInterval(loadLatestPositions, 5 * 60 * 1000); // 5分おきに最新位置を更新
 </script>
 
 </body>
