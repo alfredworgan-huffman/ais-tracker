@@ -26,6 +26,10 @@
   .popup-controls button {
     cursor: pointer; padding: 3px 8px;
   }
+  .ship-arrow {
+    /* transform-originを中心にして回転させる */
+    transform-origin: center center;
+  }
 </style>
 </head>
 <body>
@@ -45,8 +49,8 @@
 // 以下2つをSupabaseプロジェクトの値に書き換えてください
 // (anon keyは公開しても問題ない読み取り専用キーです。service_roleキーは絶対に使わないこと)
 // ------------------------------------------------------------
-const SUPABASE_URL = "https://xzkvlsgkciwjkrlqzcmm.supabase.co";
-const SUPABASE_ANON_KEY = "sb_publishable_oSHH1EM145MzI-DiDIKndw_3PYkmDly";
+const SUPABASE_URL = "https://YOUR-PROJECT.supabase.co";
+const SUPABASE_ANON_KEY = "YOUR-ANON-KEY";
 
 // 航跡の表示期間の選択肢 (時間単位)
 const PERIOD_OPTIONS = [
@@ -65,6 +69,25 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
 const markers = {};      // mmsi -> Leaflet marker (最新位置)
 const trackLayers = {};  // mmsi -> Leaflet layerGroup (点+線の航跡、表示中のみ存在)
 let geofenceLayer = null;
+
+// 向き(度)に応じて回転した矢印アイコンを作る。
+// heading/cogが無い(null)場合は、向きの分からない丸アイコンにフォールバックする。
+function buildShipIcon(headingDeg) {
+  if (headingDeg === null || headingDeg === undefined) {
+    return L.divIcon({
+      html: `<div style="width:12px;height:12px;border-radius:50%;background:#1976d2;border:1px solid white;"></div>`,
+      className: '', iconSize: [12, 12], iconAnchor: [6, 6]
+    });
+  }
+  const svg = `
+    <svg class="ship-arrow" width="24" height="24" viewBox="0 0 24 24"
+         style="transform: rotate(${headingDeg}deg);">
+      <polygon points="12,2 19,21 12,16 5,21" fill="#1976d2" stroke="white" stroke-width="1"/>
+    </svg>`;
+  return L.divIcon({
+    html: svg, className: '', iconSize: [24, 24], iconAnchor: [12, 12]
+  });
+}
 
 async function supabaseFetch(path) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
@@ -140,17 +163,20 @@ async function loadLatestPositions() {
 
   for (const v of vessels) {
     const rows = await supabaseFetch(
-      `positions?mmsi=eq.${v.mmsi}&order=ts.desc&limit=1`
+      `positions?mmsi=eq.${v.mmsi}&order=ts.desc&limit=1&select=lat,lon,ts,heading,cog`
     );
     if (rows.length === 0) continue;
     const p = rows[0];
     const tsJst = toJstString(p.ts);
+    // TrueHeadingが無ければ対地針路(cog)で代用する(511はAISの「データ無し」の値)
+    const headingDeg = (p.heading !== null && p.heading !== 511) ? p.heading : p.cog;
 
     if (markers[v.mmsi]) {
       markers[v.mmsi].setLatLng([p.lat, p.lon]);
+      markers[v.mmsi].setIcon(buildShipIcon(headingDeg));
       markers[v.mmsi].setPopupContent(buildPopupContent(v.mmsi, v.name, tsJst));
     } else {
-      markers[v.mmsi] = L.marker([p.lat, p.lon])
+      markers[v.mmsi] = L.marker([p.lat, p.lon], { icon: buildShipIcon(headingDeg) })
         .addTo(map)
         .bindTooltip(v.name, { permanent: true, direction: 'right', className: 'ship-label' })
         .bindPopup(buildPopupContent(v.mmsi, v.name, tsJst));
