@@ -7,13 +7,25 @@
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <style>
   html, body, #map { height: 100%; margin: 0; }
-  #panel {
+  #sidePanels {
     position: absolute; top: 10px; right: 10px; z-index: 1000;
-    background: white; padding: 10px 14px; border-radius: 8px;
-    font-family: sans-serif; font-size: 14px; max-width: 280px;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+    display: flex; flex-direction: column; gap: 8px;
+    max-width: 280px;
   }
-  #panel h3 { margin: 0 0 6px; font-size: 15px; }
+  .side-panel {
+    background: white; border-radius: 8px;
+    font-family: sans-serif; font-size: 14px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+    overflow: hidden;
+  }
+  .side-panel-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 14px; cursor: pointer; user-select: none;
+  }
+  .side-panel-header h3 { margin: 0; font-size: 15px; }
+  .side-panel-toggle { font-size: 13px; color: #666; }
+  .side-panel-body { padding: 0 14px 12px; }
+  #vesselPanel .side-panel-body { max-height: 65vh; overflow-y: auto; }
   #geofenceToggle { margin-top: 8px; }
   .ship-label {
     background: rgba(255,255,255,0.85); border: none; box-shadow: none;
@@ -30,14 +42,6 @@
     /* transform-originを中心にして回転させる */
     transform-origin: center center;
   }
-  #vesselPanel {
-    position: absolute; top: 10px; left: 10px; z-index: 1000;
-    background: white; padding: 10px 14px; border-radius: 8px;
-    font-family: sans-serif; font-size: 13px; max-width: 240px;
-    max-height: 80vh; overflow-y: auto;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.3);
-  }
-  #vesselPanel h3 { margin: 0 0 6px; font-size: 15px; }
   .group-block { margin-bottom: 6px; }
   .group-header, .subgroup-header {
     display: flex; align-items: center; cursor: pointer; user-select: none;
@@ -56,36 +60,51 @@
 <body>
 
 <div id="map"></div>
-<div id="vesselPanel">
-  <h3>表示する船</h3>
-  <div id="vesselList">読み込み中...</div>
-</div>
-<div id="panel">
-  <h3>登録船監視マップ</h3>
-  <div id="status">読み込み中...</div>
-  <label id="geofenceToggle">
-    <input type="checkbox" id="geofenceCheckbox"> ジオフェンスを表示
-  </label>
+<div id="sidePanels">
 
-  <div id="periodPanel" style="margin-top:10px; border-top:1px solid #ddd; padding-top:8px;">
-    <div style="font-weight:bold; margin-bottom:4px;">航跡表示期間</div>
-    <select id="periodPreset" style="width:100%; font-size:13px;">
-      <option value="0,1">直近24時間</option>
-      <option value="0,3">直近3日</option>
-      <option value="0,7" selected>直近7日</option>
-      <option value="7,14">7〜14日前</option>
-      <option value="14,30">14〜30日前</option>
-      <option value="custom">カスタム(日数を指定)</option>
-    </select>
-    <div id="customPeriodInputs" style="display:none; margin-top:6px;">
-      <input type="number" id="periodFrom" min="0" max="30" value="0" style="width:50px;"> 日前 〜
-      <input type="number" id="periodTo" min="0" max="30" value="7" style="width:50px;"> 日前
+  <div class="side-panel" id="vesselPanel">
+    <div class="side-panel-header" data-target="vesselPanelBody" data-storage="ais-tracker-panel-collapsed-vessel">
+      <h3>表示する船</h3>
+      <span class="side-panel-toggle">▼</span>
     </div>
-    <button id="applyPeriodBtn" style="margin-top:6px; width:100%; cursor:pointer;">この期間で表示中の船を更新</button>
-    <div style="font-size:11px; color:#666; margin-top:4px;">
-      ※7日を超える期間は点を間引いて表示します
+    <div class="side-panel-body" id="vesselPanelBody">
+      <div id="vesselList">読み込み中...</div>
     </div>
   </div>
+
+  <div class="side-panel" id="panel">
+    <div class="side-panel-header" data-target="mainPanelBody" data-storage="ais-tracker-panel-collapsed-main">
+      <h3>登録船監視マップ</h3>
+      <span class="side-panel-toggle">▼</span>
+    </div>
+    <div class="side-panel-body" id="mainPanelBody">
+      <div id="status">読み込み中...</div>
+      <label id="geofenceToggle">
+        <input type="checkbox" id="geofenceCheckbox"> ジオフェンスを表示
+      </label>
+
+      <div id="periodPanel" style="margin-top:10px; border-top:1px solid #ddd; padding-top:8px;">
+        <div style="font-weight:bold; margin-bottom:4px;">航跡表示期間</div>
+        <select id="periodPreset" style="width:100%; font-size:13px;">
+          <option value="0,1">直近24時間</option>
+          <option value="0,3">直近3日</option>
+          <option value="0,7" selected>直近7日</option>
+          <option value="7,14">7〜14日前</option>
+          <option value="14,30">14〜30日前</option>
+          <option value="custom">カスタム(日数を指定)</option>
+        </select>
+        <div id="customPeriodInputs" style="display:none; margin-top:6px;">
+          <input type="number" id="periodFrom" min="0" max="30" value="0" style="width:50px;"> 日前 〜
+          <input type="number" id="periodTo" min="0" max="30" value="7" style="width:50px;"> 日前
+        </div>
+        <button id="applyPeriodBtn" style="margin-top:6px; width:100%; cursor:pointer;">この期間で表示中の船を更新</button>
+        <div style="font-size:11px; color:#666; margin-top:4px;">
+          ※7日を超える期間は点を間引いて表示します
+        </div>
+      </div>
+    </div>
+  </div>
+
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -94,8 +113,29 @@
 // 以下2つをSupabaseプロジェクトの値に書き換えてください
 // (anon keyは公開しても問題ない読み取り専用キーです。service_roleキーは絶対に使わないこと)
 // ------------------------------------------------------------
-const SUPABASE_URL = "https://xzkvlsgkciwjkrlqzcmm.supabase.co";
-const SUPABASE_ANON_KEY = "sb_publishable_oSHH1EM145MzI-DiDIKndw_3PYkmDly";
+const SUPABASE_URL = "https://YOUR-PROJECT.supabase.co";
+const SUPABASE_ANON_KEY = "YOUR-ANON-KEY";
+
+// --- パネル全体(見出しごと)の折りたたみ ---
+// スマホなど画面が狭い場合、パネル自体を畳んで地図の面積を確保できるようにする。
+// 状態はlocalStorageに保存し、次回開いた時も維持する。
+document.querySelectorAll('.side-panel-header').forEach(header => {
+  const targetId = header.dataset.target;
+  const storageKey = header.dataset.storage;
+  const body = document.getElementById(targetId);
+  const arrow = header.querySelector('.side-panel-toggle');
+
+  const isCollapsed = localStorage.getItem(storageKey) === '1';
+  body.style.display = isCollapsed ? 'none' : 'block';
+  arrow.textContent = isCollapsed ? '▶' : '▼';
+
+  header.addEventListener('click', () => {
+    const nowHidden = body.style.display !== 'none';
+    body.style.display = nowHidden ? 'none' : 'block';
+    arrow.textContent = nowHidden ? '▶' : '▼';
+    localStorage.setItem(storageKey, nowHidden ? '1' : '0');
+  });
+});
 
 const map = L.map('map').setView([34.5, 133.5], 7); // 瀬戸内海周辺を初期表示
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
