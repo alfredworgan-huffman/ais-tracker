@@ -1,0 +1,21 @@
+name: 受信カバレッジ検証(手動実行専用)
+
+# 定期実行はしない。診断が必要な時だけActionsタブから手動で実行する。
+on:
+  workflow_dispatch: {}
+
+jobs:
+  coverage_test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - run: python coverage_test.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          AISSTREAM_API_KEY: ${{ secrets.AISSTREAM_API_KEY }}
+          LISTEN_SECONDS: "180"
